@@ -242,7 +242,7 @@ class Market:
     #     self.scale_min = trans_hist_pub.min()
     #     return (trans_hist_pub - self.scale_min)/(self.scale_max-self.scale_min)
 
-class Main:
+class Solver:
     def __init__(self, args = None):
         self.main_dir = '/www/ml/aibot/opt_trd'
         self.console_display = args.console_display
@@ -430,7 +430,6 @@ if __name__ == "__main__":
 
         argp.add_argument('--train_set_dir', action="store", default="lvl2_samples")
         argp.add_argument('--train_set_no', type=int, default=66)
-        argp.set_defaults(console_display=True)
 
         argp.add_argument('--console_display', dest='console_display', action='store_false', default=True)
 
@@ -447,6 +446,7 @@ if __name__ == "__main__":
 
         # Agent
         argp.add_argument('--exploration_decay', type=float, default=0.999)
+        argp.add_argument('--init_exploration_rate', type=float, default=0.9)
         argp.add_argument('--max_memory', type=int, default=700)
         argp.add_argument('--sample_batch_size', type=int, default=700)
         argp.add_argument('--train_gap', type=int, default=5)
@@ -456,12 +456,12 @@ if __name__ == "__main__":
         args = argp.parse_args()
         print(args)
 
-    m = Main(args)
+    solver = Solver(args)
     if args.train_mode:
         print("Train Mode Begins")
-        m.train(args)
+        solver.train(args)
     elif args.simulation_mode:
         print("Simulation Mode Begins")
-        m.simulate(args)
+        solver.simulate(args)
     else:
         print("Something Else")
