@@ -1,4 +1,5 @@
 import datetime
+import random
 import pdb
 import numpy as np
 import pandas as pd
@@ -22,15 +23,15 @@ def load_scaled_trans_hist_pub(args):
 
     return trans_hist_pub, scale_max, scale_min
 
-def load_train_set(args, file=None):
+def load_and_format(data_dir, data_no, file=None):
     '''
     load raw order book data & change column names
     '''
 
     if file is None:
-        raw_file = args.data_dir+ '/' + 'trade2009_' + str(args.train_set_no) + '.csv'
+        raw_file = data_dir+ '/' + 'trade2009_' + str(data_no) + '.csv'
     else:
-        raw_file = args.data_dir + '/' + file
+        raw_file = data_dir + '/' + file
     rq = pd.read_csv(raw_file) # raw_tick # os.listdir(data_dir)
     print(raw_file, "is loaded")
 
@@ -64,8 +65,32 @@ def load_train_set(args, file=None):
 
     tr_rq = preprocess(tr_rq)
     cls_rq = preprocess(cls_rq)
+    cls_prc = cls_rq.iloc[0].trd_prc
 
-    return tr_rq, cls_rq
+    return tr_rq, cls_rq, cls_prc
+
+def load_data(args):
+    if args.mode=='debug':
+        test_set_no = [58, 61]
+        train_set_no = [70, 72]
+    else:
+        test_set_no = random.sample(args.data_no_list, 3)
+        train_set_no = list(set(args.data_no_list) - set(test_set_no))
+
+    train_data_list, test_data_list = [], []
+    for data_no in train_set_no:
+        data_set_raw_q, cls_raw_q, cls_prc = load_and_format(args.data_dir, data_no)
+        min1_agg_data = agg_to_min1(data_set_raw_q)
+        train_data_list.append((min1_agg_data, data_set_raw_q, cls_raw_q, cls_prc))
+    for data_no in test_set_no:
+        data_set_raw_q, cls_raw_q, cls_prc = load_and_format(args.data_dir, data_no)
+        min1_agg_data = agg_to_min1(data_set_raw_q)
+        test_data_list.append((min1_agg_data, data_set_raw_q, cls_raw_q, cls_prc))
+    return train_data_list, test_data_list
+
+def select_data(data_list):
+    return random.choice(data_list)
+
 
 def parse_state_pub(args_str):
     glossary = {'1vol': 'min1_vol', '2trd_vol': 'min1_trd_vol', '3pressure': 'pressure'}
@@ -168,3 +193,14 @@ def sort_sequence(data, len_data):
 def unsort_sequence(data, idx_unsort):
     unsorted_data = data.index_select(0, idx_unsort)
     return unsorted_data
+
+def randf(s, e):
+    return (float(random.randrange(0, (e - s) * 9999)) / 10000) + s
+
+def epsilon_greedy(greedy, epsilon):
+    batch = greedy.shape[0]
+    greedy = np.expand_dims(greedy, 0)
+    random = np.expand_dims(np.random.randint(3, size=batch), 0)
+    candidate = np.concatenate([random, greedy])
+    prob = np.random.uniform(size=batch)
+    return np.choose((prob>epsilon).astype(int), candidate)

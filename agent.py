@@ -18,10 +18,15 @@ class Agent(nn.Module):
         # input size is number of used variables (for now, simple model)
         # if use trainable preprocessing model
         input_size = 7
-        self.min_gru = nn.GRU(input_size, args.gru_h_dim, bias=False, dropout=args.dropout,
+        self.epsilon = args.init_exploration_rate
+        self.eplr_decay = args.exploration_decay
+        self.min_gru = nn.GRU(input_size, args.gru_h_dim, bias=False,
                             bidirectional= args.bidirectional, batch_first=True)
-        self.sec_gru = nn.GRU(input_size, args.gru_h_dim, bias=False, dropout=args.dropout,
+        self.sec_gru = nn.GRU(input_size, args.gru_h_dim, bias=False,
                             bidirectional= args.bidirectional, batch_first=True)
+
+        self.criterion = nn.MSELoss()
+
 
         if args.bidirectional == True:
             h_out = args.gru_h_dim * 4
@@ -31,12 +36,36 @@ class Agent(nn.Module):
         self.shared_layer = nn.Sequential(
                             nn.Linear(h_out, int(h_out/2)),
                             nn.ReLU(),
+                            nn.Dropout(args.dropout),
                             nn.Linear(int(h_out/2), 16),
                             nn.ReLU(),
+                            nn.Dropout(args.dropout),
                             nn.Linear(16, 8),
                             nn.ReLU(),
+                            nn.Dropout(args.dropout),
                             )
         self.pred_action = nn.Linear(8, 3)
+        self.select_optimizer(args)
+
+    def select_optimizer(self, args):
+        parameters = filter(lambda p: p.requires_grad, self.parameters())
+        if(args.optimizer == 'Adam'):
+            self.opt =  optim.Adam(parameters, lr=args.learning_rate,
+                                        weight_decay=args.weight_decay)
+        elif(args.optimizer == 'RMSprop'):
+            self.opt =  optim.RMSprop(parameters, lr=args.learning_rate,
+                                            weight_decay=args.weight_decay,
+                                            momentum=args.momentum)
+        elif(args.optimizer == 'SGD'):
+            self.opt =  optim.SGD(parameters, lr=args.learning_rate,
+                                        weight_decay=args.weight_decay,
+                                        momentum=args.momentum)
+        elif(args.optimizer == 'Adagrad'):
+            self.opt =  optim.Adagrad(parameters, lr=args.learning_rate)
+        elif(args.optimizer == 'Adadelta'):
+            self.opt =  optim.Adadelta(parameters, lr=args.learning_rate)
+
+
 
     def forward(self, x1, x2, x2_len):
         """
@@ -66,8 +95,10 @@ class Agent(nn.Module):
 
         state_rep = self.shared_layer(h_cat)
         action_value = F.softmax(self.pred_action(state_rep))
+        action = torch.max(action_value, 1)[1].cpu().numpy()
+
         #trade_amount = F.relu(self.pred_amount(state_rep))
-        return action_value
+        return action_value, action
 
     def predict():
         pass
