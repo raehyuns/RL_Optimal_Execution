@@ -4,6 +4,7 @@ import pdb
 import numpy as np
 import pandas as pd
 import torch
+import tensorflow as tf
 
 def load_scaled_trans_hist_pub(args):
     if args.new_trans_hist:
@@ -70,6 +71,7 @@ def load_and_format(data_dir, data_no, file=None):
     return tr_rq, cls_rq, cls_prc
 
 def load_data(args):
+    # randomly split train, test data and return preprocessed data list
     if args.mode=='debug':
         test_set_no = [58, 61]
         train_set_no = [70, 72]
@@ -90,7 +92,6 @@ def load_data(args):
 
 def select_data(data_list):
     return random.choice(data_list)
-
 
 def parse_state_pub(args_str):
     glossary = {'1vol': 'min1_vol', '2trd_vol': 'min1_trd_vol', '3pressure': 'pressure'}
@@ -204,3 +205,31 @@ def epsilon_greedy(greedy, epsilon):
     candidate = np.concatenate([random, greedy])
     prob = np.random.uniform(size=batch)
     return np.choose((prob>epsilon).astype(int), candidate)
+
+#### tensor board functions
+
+def summary(writer, loss, reward, step, mode, variables=None):
+    if mode ==  'train':
+        scalar_summary(writer, 'Train RMSE loss', loss, step)
+        scalar_summary(writer, 'Train Reward', reward, step)
+    else:
+        scalar_summary(writer, 'Test RMSE loss', loss, step)
+        scalar_summary(writer, 'Test Reward', reward, step)
+    if variables:
+        for i,v in enumerate(variables):
+            variable_summary(*v, step, writer)
+
+def variable_summary(name, var, step, writer):
+    mean = torch.mean(var)
+    add_scalar(name+'/mean', mean, step, writer)
+
+    stddev = torch.sqrt(torch.mean(torch.pow((var - mean),2)))
+    scalar_summary(name+'/stddev', stddev, step, writer)
+    scalar_summary(name+'/max', torch.max(var), step, writer)
+    scalar_summary(name+'/min', torch.min(var), step, writer)
+    add_histogram(name+'/histogram', var,step,bins='doane')
+
+def scalar_summary(writer, tag, value, step):
+    """Log a scalar variable."""
+    summary = tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value)])
+    writer.add_summary(summary, step)

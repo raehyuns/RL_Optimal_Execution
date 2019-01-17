@@ -20,10 +20,11 @@ class Agent(nn.Module):
         input_size = 7
         self.epsilon = args.init_exploration_rate
         self.eplr_decay = args.exploration_decay
-        self.min_gru = nn.GRU(input_size, args.gru_h_dim, bias=False,
-                            bidirectional= args.bidirectional, batch_first=True)
-        self.sec_gru = nn.GRU(input_size, args.gru_h_dim, bias=False,
-                            bidirectional= args.bidirectional, batch_first=True)
+        self.min_eplr = args.min_exploration_rate
+        #self.min_gru = nn.GRU(input_size, args.gru_h_dim, bias=False,
+        #                    bidirectional= args.bidirectional, batch_first=True)
+        #self.sec_gru = nn.GRU(input_size, args.gru_h_dim, bias=False,
+        #                    bidirectional= args.bidirectional, batch_first=True)
 
         self.criterion = nn.MSELoss()
 
@@ -34,7 +35,7 @@ class Agent(nn.Module):
             h_out = args.gru_h_dim * 2
 
         self.shared_layer = nn.Sequential(
-                            nn.Linear(h_out, int(h_out/2)),
+                            nn.Linear(input_size, int(h_out/2)),
                             nn.ReLU(),
                             nn.Dropout(args.dropout),
                             nn.Linear(int(h_out/2), 16),
@@ -44,7 +45,7 @@ class Agent(nn.Module):
                             nn.ReLU(),
                             nn.Dropout(args.dropout),
                             )
-        self.pred_action = nn.Linear(8, 3)
+        self.pred_action = nn.Linear(8, args.n_prc_lev*2+2)
         self.select_optimizer(args)
 
     def select_optimizer(self, args):
@@ -67,7 +68,7 @@ class Agent(nn.Module):
 
 
 
-    def forward(self, x1, x2, x2_len):
+    def forward(self, x1, x2=None, x2_len=None):
         """
         Get value function approximated by the agent
         [ Input ]
@@ -77,6 +78,7 @@ class Agent(nn.Module):
         [ Output ]
         action_value    : [Bid, Netral, Ask] action value
         """
+        '''
         def get_last_state(batch_h_seq, idx_list):
             last_h_list = []
             for h_seq, idx in zip(batch_h_seq, idx_list):
@@ -92,10 +94,12 @@ class Agent(nn.Module):
         padded_h, padded_length = pad_packed_sequence(packed_h, batch_first=True)
         h2 = unsort_sequence(get_last_state(padded_h, padded_length), idx_unsort)
         h_cat = torch.cat([h1, h2], 1)
-
-        state_rep = self.shared_layer(h_cat)
-        action_value = F.softmax(self.pred_action(state_rep))
-        action = torch.max(action_value, 1)[1].cpu().numpy()
+        '''
+        #state_rep = self.shared_layer(h_cat)
+        state_rep = self.shared_layer(torch.FloatTensor(x1).cuda())
+        #policy = F.softmax(self.pred_action(state_rep), dim=1)
+        action_value = torch.sum(self.pred_action(state_rep), 0)
+        action = torch.max(action_value, 0)[1]
 
         #trade_amount = F.relu(self.pred_amount(state_rep))
         return action_value, action

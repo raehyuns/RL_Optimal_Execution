@@ -23,7 +23,7 @@ class Market:
         self.pu = args.pu
         self.console_display = args.console_display
 
-    def place_order(self, raw_q, dt_time, qu, prc=0,
+    def place_order(self, raw_q, dt_time, qu, prc, order_type,
                             time_cap=None, mkt_order=False, force_fill=False):
 
         '''
@@ -33,9 +33,9 @@ class Market:
            `raw_q`    : a data.frame for raw quote database
            'cls_raw_q`    : a data.frame for raw quote database
            `dt_time`  : a datetime.time object for the initial placement time
-           `qu`       : quantity (+ for buy, - for sell)
-           `prc` = 0  : placing an order at the best price
-           `prc` = 1  : placing an order at the next best price
+           `qu`       : quantity (always positive value)
+           `prc` = 1  : placing an order at the best price
+           `prc` = 2  : placing an order at the next best price
            'cls_prc'  : price at the end of the day
            `mkt_order`: sweeping the OB immediately. (voiding `prc`)
            `time_cap` : If not filled until this length of the time, place market order
@@ -48,6 +48,8 @@ class Market:
            `last_exe`: `dt` of last execution (possibly needed for order duration)
            `revenue`    : revenue or Cash flow from this order
         '''
+        if order_type =='ask':
+            qu *= -1
 
         def r4(x): return(round(x, 4))
 
@@ -159,7 +161,6 @@ class Market:
                         last_exe = raw_q_idx.dt_time
                         if self.console_display:
                             self.logger.info("partial execution {} {}".format(qu_trd, last_exe))
-
                 else:
                     # Assume that if market price went down below my qoute prices
                     # my quote would have been traded before
