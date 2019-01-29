@@ -76,7 +76,7 @@ def load_data(args):
         test_set_no = [58, 61]
         train_set_no = [70, 72]
     else:
-        test_set_no = random.sample(args.data_no_list, 3)
+        test_set_no = random.sample(args.data_no_list, args.n_test_day)
         train_set_no = list(set(args.data_no_list) - set(test_set_no))
 
     train_data_list, test_data_list = [], []
@@ -149,7 +149,8 @@ def agg_to_sec1(rq):
     return mkt_sec1
 
 def normalize_target_cols(all_df, ):
-    non_target = ['agg_vol', 'agg_trd_vol', 'pressure']
+    #non_target = ['agg_vol', 'agg_trd_vol', 'pressure']
+    non_target = ['agg_trd_vol', 'pressure']
     target_df = all_df.drop(non_target, 1)
     normed = min_max_normalize(target_df)
     normed_df = all_df[non_target].join(normed)
@@ -233,3 +234,24 @@ def scalar_summary(writer, tag, value, step):
     """Log a scalar variable."""
     summary = tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value)])
     writer.add_summary(summary, step)
+
+def histogram_summary(writer, name, values, step):
+    hist = tf.summary.histogram(name, values)
+    '''
+    hist = tf.HistogramProto()
+    hist.min = float(np.min(values))
+    hist.max = float(np.max(values))
+    hist.num = int(np.prod(values.shape))
+    hist.sum = float(np.sum(values))
+    hist.sum_squares = float(np.sum(values**2))
+    '''
+    summary = tf.Summary()
+    summary.value.add(tag=name, histo=hist)
+    writer.add_summary(summary, step)
+    #summary = tf.Summary(value=[tf.Summary.Value(tag=name, histo=hist)])
+
+def act_dist_summary(writer, act_dist, n_split, step, type):
+    area = len(act_dist)//n_split
+    for p in range(n_split):
+        v = act_dist[p*area:(p+1)*area].sum()
+        writer.add_scalar('{} Act Value Area {}'.format(type, p+1), v, step)
