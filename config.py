@@ -4,25 +4,29 @@ def get_args():
     argp = argparse.ArgumentParser(description='Optimal Trade Execution',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     # Main Control
-    argp.add_argument('--data_dir', action="store", default="./data/samples")
+    argp.add_argument('--data_dir', action="store", default="./data")
+    argp.add_argument('--sec_type', type=str, default="stock", choices=['stock', 'future'])
     argp.add_argument('--save_dir', action="store", default="./save")
-    argp.add_argument('--data_no_list', type=list, default=[n for n in range(58,73)])
     argp.add_argument('--save_log', action='store_true', default=False)
     argp.add_argument('--tf_board', action='store_true', default=False)
     argp.add_argument('--console_display', dest='console_display', action='store_true', default=False)
-    argp.add_argument('--mode', default='train', choices=['train', 'simulation', 'debug'])
+    argp.add_argument('--mode', default='train', choices=['train', 'simulation', 'debug', 'real_trading'])
     argp.add_argument('--new_trans_hist', action="store_true", default=False)
     argp.add_argument('--n_test_day', type=int, default=1)
 
     # Problem Setting
-    argp.add_argument('--order_type', type=str, default='bid', choices=['bid', 'ask'])
+    argp.add_argument('--test_sec_name', type=str, default='3월물')
+    argp.add_argument('--train_all', action="store_true", default=False)
+    argp.add_argument('--order_type', type=str, default='buy', choices=['buy', 'sell'])
     argp.add_argument('--benchmark_type', type=str, default='day_close', choices=['day_close', 'window_close'])
     argp.add_argument('--order_amt', type=int, default=100)
     argp.add_argument('--n_amt_lv', type=int, default=20)
-    argp.add_argument('--trade_price_assumption', type=str, default='midprice', choices=['midprice', 'market-order'])
+    argp.add_argument('--trade_price_assumption', type=str, default='midprice',
+                    choices=['midprice', 'market_simulator', 'market-order'])
     argp.add_argument('--min_lookback', type=int, default=10, help='how many minutes agent should look')
     argp.add_argument('--max_time', type=int, default=30)
     argp.add_argument('--non_trade_penalty', type=float, default=5)
+    argp.add_argument('--quantity_penalty', type=float, default=0)
     argp.add_argument('--pu', type=float, default=0.05)
     argp.add_argument('--transaction_fee', type=float, default=0.0)
     argp.add_argument('--state_pub', action="store", default="1vol, 2trd_vol, 3pressure")
@@ -30,6 +34,8 @@ def get_args():
     #argp.add_argument('--time_limit', type=int, default=10, help='maximum minutes for decision')
 
     # Agent
+    argp.add_argument('--load_agent', action="store_true", default=False)
+    argp.add_argument('--saved_model_id', action="store_true", default=False)
     argp.add_argument('--update_interval', type=int, default=30)
     argp.add_argument('--eval_interval', type=int, default=50)
     argp.add_argument('--max_episode', type=int, default=50000)

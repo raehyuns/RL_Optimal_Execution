@@ -1,5 +1,6 @@
-
 import os
+import datetime as DT
+from datetime import timedelta
 import time
 import argparse
 import random
@@ -7,11 +8,15 @@ import uuid
 import pdb
 import logging
 import pickle
+import pymongo
+from pymongo import MongoClient
 
 from utils import *
 from market import *
 from agent import *
 from config import *
+#from order import *
+import qaracs
 
 import torch
 import torch.nn as nn
@@ -55,8 +60,10 @@ class Solver:
 
         self.console_display = args.console_display
         self.sample_batch_size = args.sample_batch_size
+        self.n_amt_lv = args.n_amt_lv
         self.amt_unit = args.order_amt // args.n_amt_lv
         self.non_trd_beta = args.non_trade_penalty
+        self.q_fac_r = args.quantity_penalty
         self.pu = args.pu
         self.lookback = args.min_lookback
         self.max_time = args.max_time
@@ -68,17 +75,22 @@ class Solver:
         self.exp_memory = ReplayMemory(args.max_memory)
         self.agent = Agent(args).cuda()
         self.logger.info(self.agent)
-
+        self.eval_prices = []
         # store all train, test dataset in list
         # each element of list is tuple of (raw dataframe, close price)
-        self.train_data_list, self.test_data_list = load_data(args)
+
+        if args.mode != 'real_trading':
+            self.train_data_list, self.test_data_list = load_data(args.sec_type, args.data_dir,
+                                                        args.test_sec_name, args.n_test_day,
+                                                        args.trade_price_assumption,
+                                                        args.mode, args.train_all)
+            self.mkt.train_min1_agg, self.mkt.train_raw_q, self.mkt.train_simtr, self.mkt.cls_prc = select_data(self.train_data_list)
+
         self.logger.info("All data loaded")
 
-        self.mkt.train_min1_agg, self.mkt.train_raw_q, self.mkt.cls_raw_q, self.mkt.cls_prc = select_data(self.train_data_list)
         self.trans_hist = []
 
         self.logger.info("Solver object is initialized")
-
 
     def get_state(self, min1_agg_data, raw_data, cur_idx, remain_t=1, remain_q=1):
         """
@@ -101,19 +113,49 @@ class Solver:
         frt_dt = min1_agg_data.iloc[cur_idx-1, :]['dt_time']
         cur_midprc = min1_agg_data.iloc[cur_idx, :]['midprice']
 
+        lb = min(self.lookback, cur_idx)
+        target_df = min1_agg_data.iloc[cur_idx-lb:cur_idx].drop('dt_time', 1)
+        bid1_prc = target_df.bid_P1.iloc[-1]
+        ask1_prc = target_df.ask_P1.iloc[-1]
+
         # Aggregated minute information to provide Longer term
         #summary_cols = ['agg_vol', 'agg_trd_vol', 'pressure',
-        #                'ask_P1', 'bid_P1', 'ask_Qa', 'bid_Qa']
-        summary_cols = ['agg_trd_vol', 'pressure', 'midprice']
-
-        lb = min(self.lookback, cur_idx)
-        long_X = normalize_target_cols(min1_agg_data.iloc[cur_idx-lb:cur_idx][summary_cols])
-        state = np.concatenate([[remain_q, remain_t], long_X[['agg_trd_vol', 'pressure']].mean().values,
-                                                        long_X.midprice.values])
-
+                        #'ask_P1', 'bid_P1', 'ask_Qa', 'bid_Qa']
+        state = select_and_normalize(target_df)
         #short_X = raw_data.loc[(raw_data.time_hr==frt_dt.hour) & (raw_data.time_min==frt_dt.minute)]
         #short_X = normalize_target_cols(agg_to_sec1(short_X)[summary_cols])
-        return cur_dt, state, cur_midprc
+        return cur_dt, state, cur_midprc, bid1_prc, ask1_prc
+
+    def sim_trd_prc(self, cur_dt, end_dt, qt_prc, qt_amt, mkt_sim):
+        '''
+        Simulated Transaction at this game's date would mkt_sim
+        (Loaded and Stored with raw market data)
+        ISSUE : should check that the prices match !! (different DB)
+        '''
+        order_hr, order_min = cur_dt.hour, cur_dt.minute
+        end_hr, end_min = end_dt.hour, end_dt.minute
+        # temporary price only for debug
+        order_hr, order_min = 12, 46
+        end_dt = end_dt.replace(day=14, hour=13,minute=1)
+        # Time & Price Condition
+        executed = mkt_sim.loc[(mkt_sim.order_hr==order_hr)\
+                                & (mkt_sim.order_min==order_min)]
+                                #& (mkt_sim.OrdPrc==qt_prc)]
+        # temporary price only for debug
+        executed = executed.loc[executed.OrdPrc==executed.OrdPrc.iloc[0]]
+        # Executed before game end point
+        valid = executed.loc[(executed.ExecTime<=end_dt)]
+
+        remain_q = qt_amt
+        exe_info = []
+        for idx, trans in valid.iterrows():
+            exe_info.append((min(trans.execqty, remain_q), trans.execprc))
+            remain_q -= (min(trans.execqty, remain_q))
+            if remain_q <= 0:
+                break
+        qty, prc = np.array(exe_info)[:,0], np.array(exe_info)[:,1]
+        trd_prc = (qty*prc).sum() / qty.sum()
+        return trd_prc, qty.sum()
 
     def get_baseline(self, min1_agg_data, raw_data, cur_idx):
         start_dt = min1_agg_data.iloc[cur_idx]['dt_time']
@@ -127,22 +169,26 @@ class Solver:
 
     def get_reward(self, trd_prc, trd_amt_lv, bc_prc, remain_t, remain_q):
         # all rewards are calculated based on difference btw close price & traded price
-        t_factor = 1+remain_t
+        t_factor = np.sqrt(remain_t)
         if trd_amt_lv == 0:
             # reward when agent decide not to trade, should consider opportunity cost
-            if self.order_type =='bid':
-                reward_rate = ((trd_prc - bc_prc) / bc_prc)
+            if self.order_type =='buy':
+                reward_rate = ((trd_prc - bc_prc) / bc_prc) * t_factor
             else: # ask
-                reward_rate = ((bc_prc - trd_prc) / bc_prc)
+                reward_rate = ((bc_prc - trd_prc) / bc_prc) * t_factor
             reward = reward_rate * t_factor
         else:
-            q_factor = np.log(trd_amt_lv) + 1
-            if self.order_type =='bid':
+            # reward when agent decide to trade
+            q_factor = self.q_fac_r * np.log(trd_amt_lv//2+1) + 1
+            if self.order_type =='buy':
                 reward = ((bc_prc - trd_prc) / bc_prc) * t_factor * q_factor
             else: # ask
                 reward = ((trd_prc - bc_prc) / bc_prc) * t_factor * q_factor
-        return reward
-
+        if reward < 0:
+            # risk aversion
+            return reward * 2
+        else:
+            return reward
 
     def train(self, args):
         temp_reward_writer = []
@@ -158,7 +204,11 @@ class Solver:
         eval_step = 0
         while episode_step < args.max_episode:
             # Initialize random point to start episode. Decision is made every minute
-            cur_idx = random.randint(0+args.min_lookback, self.mkt.train_min1_agg.shape[0]-args.max_time)
+            date = dt.datetime.strptime(str(self.mkt.train_raw_q.iloc[0]['date']), '%Y%m%d')
+            cur_idx = random.randint(0+args.min_lookback, self.mkt.train_min1_agg.shape[0]-args.max_time-1)
+            end_idx = cur_idx + self.max_time
+            end_t = self.mkt.train_min1_agg.iloc[end_idx]['dt_time']
+            end_dt = dt.datetime.combine(date, end_t)
             twap_prc, vwap_prc, end_prc = self.get_baseline(self.mkt.train_min1_agg, self.mkt.train_raw_q, cur_idx)
 
             # set benchmark price for episode
@@ -172,28 +222,37 @@ class Solver:
                 # Continuely add (state, reward tuple to memory) while proceeding episode
                 rq = remain_q / args.order_amt
                 rt = remain_t / args.max_time
-                dt, x, mid_prc = self.get_state(self.mkt.train_min1_agg, self.mkt.train_raw_q, cur_idx, rt, rq)
+                cur_t, x, mid_prc, bid1_prc, ask1_prc = self.get_state(self.mkt.train_min1_agg, self.mkt.train_raw_q, cur_idx, rt, rq)
+                cur_dt = dt.datetime.combine(date, cur_t)
                 act_value, agt_action = self.agent(x)
-
                 # epsilon-greedy
                 if np.random.uniform()<self.agent.epsilon: # random action
                     act_idx = np.random.randint(args.n_amt_lv+1)
                 else: # greedy action
                     act_idx = agt_action.cpu().item()
 
+                if act_idx%2==0: # Quote price = Bid 1
+                    qt_prc = bid1_prc
+                else: # Quote price = Ask 1
+                    qt_prc = ask1_prc
+                qt_amt = (act_idx//2+1) * self.amt_unit
                 if args.trade_price_assumption=='midprice':
                     trd_prc = mid_prc
-                #elif args.trade_price_assumption=='market_order':
-                    #order_result = self.mkt.place_order(self.mkt.train_raw_q, dt, args.one_trd_amt, prc_lev, args.order_type)
-                    #trd_prc, exe_qu = order_result['qu_prc'], order_result['qu_exe']
+                    trd_amt = qt_amt
+                elif args.trade_price_assumption=='market_simulator':
+                    trd_prc, trd_amt = self.sim_trd_prc(cur_dt, end_dt,
+                                                qt_prc, qt_amt, self.mkt.train_simtr)
+                    if trd_amt != qt_amt: # when not fully traded
+                        res_amt = qt_amt - trd_amt
+                        trd_prc = ((trd_amt*trd_prc) + (res_amt*bc_prc)) / qt_amt
                 # calculating reward
                 if act_idx != 0 : # if trade
-                    trd_amt = act_idx * self.amt_unit
                     reward = self.get_reward(trd_prc, act_idx, bc_prc, rt, rq)
                     remain_q -= min(remain_q, trd_amt)
                 else: # should decide how to cal reward when not trade
                     # considering remain_q and current mid price to calculate opportunity cost (remain time & order)
                     reward = self.get_reward(trd_prc, 0, bc_prc, rt, rq)
+
                 self.exp_memory.push((act_value, act_idx, reward))
 
                 # private state update
@@ -234,12 +293,13 @@ class Solver:
                     self.writer.add_scalar('Train Reward', true_rwd.mean().cpu().item()*100, update_step)
                     act_dist_summary(self.writer, act_dist, 7, update_step, 'Train')
                 # Sample another dataset
-                self.mkt.train_min1_agg, self.mkt.train_raw_q, self.mkt.cls_raw_q, self.mkt.cls_prc = select_data(self.train_data_list)
+                self.mkt.train_min1_agg, self.mkt.train_raw_q, self.mkt.train_simtr, self.mkt.cls_prc = select_data(self.train_data_list)
                 update_step += 1
 
             # Evaluation
             if episode_step % args.eval_interval == 0 and episode_step !=0:
                 result = self.evaluate(args, eval_step)
+                torch.save(self.agent.state_dict(), './save/model/{}'.format(self.model_id))
                 eval_step += 1
 
 
@@ -249,44 +309,62 @@ class Solver:
             trd_hist_file = open(args.save_dir + '/trd_hist/' + self.model_id + '.txt', 'w')
             trd_hist_file.write(str(args) + '\r\n')
             trd_hist_file.flush()
-        self.mkt.test_min1_agg, self.mkt.test_raw_q, self.mkt.te_cls_raw_q, self.mkt.te_cls_prc = select_data(self.test_data_list)
+        self.mkt.test_min1_agg, self.mkt.test_raw_q, self.mkt.test_simtr, self.mkt.te_cls_prc = select_data(self.test_data_list)
 
         self.logger.info("\n\n-----------------------Start evaluating an agent")
 
         episode_step = 0
         report_list = []
         act_dist_list = []
+
         while episode_step < args.n_eval_episode:
+            date = dt.datetime.strptime(str(self.mkt.test_raw_q.iloc[0]['date']), '%Y%m%d')
             cur_idx = random.randint(0+args.min_lookback, self.mkt.test_min1_agg.shape[0]-args.max_time)
             twap_prc, vwap_prc, end_prc = self.get_baseline(self.mkt.test_min1_agg, self.mkt.test_raw_q, cur_idx)
-            remain_q = args.order_amt
-            remain_t = args.max_time
             # set benchmark price for episode
             if args.benchmark_type == 'day_close':
                 bc_prc = self.mkt.cls_prc
             elif args.benchmark_type == 'window_close':
                 bc_prc = end_prc
+            remain_q = args.order_amt
+            remain_t = args.max_time
+            # For report
             n_execute = 0
             no_trd = 0
-            act_dist = [0] * (args.n_amt_lv+1)
+            act_dist = [0] * (args.n_amt_lv*2+1)
             episode_loss = []
             episode_reward = []
             episode_exe = []
             while (remain_q and remain_t):
                 rq = remain_q / args.order_amt
                 rt = remain_t / args.max_time
-                dt, x, mid_prc = self.get_state(self.mkt.test_min1_agg, self.mkt.test_raw_q, cur_idx, rt, rq)
+                cur_t, x, mid_prc, bid1_prc, ask1_prc = self.get_state(self.mkt.test_min1_agg, self.mkt.test_raw_q, cur_idx, rt, rq)
+                cur_dt = dt.datetime.combine(date, cur_t)
                 self.agent.eval()
                 act_value, agt_action = self.agent(x)
                 act_idx = agt_action.cpu().item()
+                '''
+                fix action to understand reward structure
+                agt_action = torch.LongTensor([5]).cuda()
+                agt_idx = 5
+                '''
+                if act_idx%2==0: # Quote price = Bid 1
+                    qt_prc = bid1_prc
+                else: # Quote price = Ask 1
+                    qt_prc = ask1_prc
+                qt_amt = (act_idx//2+1) * self.amt_unit
                 if args.trade_price_assumption=='midprice':
                     trd_prc = mid_prc
-                #elif args.trade_price_assumption=='market_order':
-                    #order_result = self.mkt.place_order(self.mkt.test_raw_q, dt, args.one_trd_amt, prc_lev, args.order_type)
-                    #trd_prc, exe_qu = order_result['qu_prc'], order_result['qu_exe']
+                    trd_amt = qt_amt
+                elif args.trade_price_assumption=='market_simulator':
+                    trd_prc, trd_amt = self.sim_trd_prc(cur_dt, end_dt,
+                                                qt_prc, qt_amt, self.mkt.train_simtr)
+                    if trd_amt != qt_amt: # when not fully traded
+                        res_amt = qt_amt - trd_amt
+                        trd_prc = ((trd_amt*trd_prc) + (res_amt*bc_prc)) / qt_amt
+
                 # calculating reward
                 if act_idx != 0 : # if trade
-                    trd_amt= act_idx * self.amt_unit
                     true_rwd = self.get_reward(trd_prc, act_idx, bc_prc, rt, rq)
                     episode_exe.append((trd_prc, min(remain_q, trd_amt)))
                     remain_q -= min(remain_q, trd_amt)
@@ -299,17 +377,21 @@ class Solver:
                 remain_t -= 1
                 n_execute += 1
             if remain_q:
-                episode_exe.append((self.mkt.cls_prc, remain_q))
+                episode_exe.append((end_prc, remain_q))
             episode_exe = np.array(episode_exe)
 
             avg_prc = (episode_exe[:,0]*episode_exe[:,1]).sum() / args.order_amt
             loss = np.sqrt(np.square(episode_loss).mean())
             def price_diff(agt_prc, target_prc, type):
-                if type == 'bid':
+                if type == 'buy':
                     return target_prc-agt_prc
                 else:
                     return agt_prc-target_prc
-            cls_reward = price_diff(avg_prc, self.mkt.cls_prc, self.order_type)
+            self.eval_prices.append([avg_prc, twap_prc, vwap_prc, end_prc])
+            with open('./save/res/{}.pkl'.format(self.model_id), 'wb') as f:
+                pickle.dump(self.eval_prices, f)
+
+            cls_reward = price_diff(avg_prc, end_prc, self.order_type)
             twap_reward = price_diff(avg_prc, twap_prc, self.order_type)
             vwap_reward = price_diff(avg_prc, vwap_prc, self.order_type)
             no_trd_rate = no_trd/n_execute
@@ -337,10 +419,60 @@ class Solver:
             act_dist_summary(self.writer, act_dist, 7, eval_step, 'Eval')
         return
 
+    def update_mkt_info(self, symbols):
+        for s in symbols:
+            self.mkt_data_dict[s] = get_data_from_db(s)
+
+    def real_trading(self, args):
+
+        self.agent.load_state_dict(torch.load('./save/model/20190219-3ff40e35'))
+        self.agent.eval()
+
+        delay = 60.0
+        while True:
+            self.update_mkt_info(symbols)
+            start_dt = datetime.fromtimestamp(time.time()).replace(hour=9, minute=30)
+            end_dt = datetime.fromtimestamp(time.time()).replace(hour=15, minute=15)
+            final_order, valid_order = get_live_orders()
+
+            time.sleep(delay - ((time.time() - starttime) % delay))
+
+        #if final_order: # placing all remain amt at market price user qaracs request_market_price_all
+        #    request_final_order(final_orders)
+
+        remain_q = args.order_amt
+        remain_t = args.max_time
+        date = DT.datetime.strptime(str(raw_q.iloc[0]['date']), '%Y%m%d')
+        cur_idx = min1_agg.shape[0]-1
+
+        while (remain_q and remain_t):
+            rq = remain_q / args.order_amt
+            rt = remain_t / args.max_time
+            cur_t, x, mid_prc, bid1_prc, ask1_prc = self.get_state(min1_agg, raw_q, cur_idx, rt, rq)
+            cur_dt = DT.datetime.combine(date, cur_t)
+            act_value, agt_action = self.agent(x)
+            act_idx = agt_action.cpu().item()
+            if act_idx%2==0: # Quote price = Bid 1
+                qt_prc = bid1_prc
+            else: # Quote price = Ask 1
+                qt_prc = ask1_prc
+            qt_amt = (act_idx//2+1) * self.amt_unit
+
+            ord_res = qaracs.request_order('005930', qt_prc, qt_amt, 'stock', self.order_type)
+            print(ord_res)
+            proc_time = time.time() + timedelta(hours=0,minutes=remain_t).total_seconds()
+            resv_res = qaracs.request_market_price_all(ord_res['ordno'], proc_time)
+            print(resv_res)
+            pdb.set_trace()
+
+            remain_t -= 1
+
+    def real_orders(valid_order):
+        pass
+
 if __name__ == "__main__":
 
     args = get_args()
-
 
     # set a logger
     model_id = time.strftime("%Y%m%d-") + str(uuid.uuid4())[:8]
@@ -372,5 +504,8 @@ if __name__ == "__main__":
         args.eval_interval = 5
         args.n_eval_episode = 2
         solver.train(args)
+    elif 'real_trading' in args.mode:
+        logger.info("Trading with AI agent at real market")
+        solver.real_trading(args)
     else:
         logger.info("Something Else")

@@ -1,10 +1,15 @@
+import os
 import datetime
+import datetime as DT
+import time
 import random
 import pdb
 import numpy as np
 import pandas as pd
 import torch
 import tensorflow as tf
+import pymongo
+from pymongo import MongoClient
 
 def load_scaled_trans_hist_pub(args):
     if args.new_trans_hist:
@@ -24,70 +29,106 @@ def load_scaled_trans_hist_pub(args):
 
     return trans_hist_pub, scale_max, scale_min
 
-def load_and_format(data_dir, data_no, file=None):
+def preprocess(rq):
+    rq['dt_time'] = [
+        datetime.time(int(str(x)[:-7]), int(str(x)[-7:-5]), int(str(x)[-5:-3]), int(str(x)[-3:]) * 1000) for x in
+        rq['time']]
+    rq['time_hr'] = [x.hour for x in rq['dt_time']]
+    rq['time_min'] = [x.minute for x in rq['dt_time']]
+    rq['time_sec'] = [x.second for x in rq['dt_time']]
+
+    rq.rename(columns={
+        'price': 'trd_prc', 'volume': 'trd_vol',
+        'ASK_TOT_ORD_RQTY': 'ask_Qa', 'BID_TOT_ORD_RQTY': 'bid_Qa',
+        'ASK_STEP1_BSTORD_PRC': 'ask_P1', 'ASK_STEP1_BSTORD_RQTY': 'ask_Q1',
+        'BID_STEP1_BSTORD_PRC': 'bid_P1', 'BID_STEP1_BSTORD_RQTY': 'bid_Q1',
+        'ASK_STEP2_BSTORD_PRC': 'ask_P2', 'ASK_STEP2_BSTORD_RQTY': 'ask_Q2',
+        'BID_STEP2_BSTORD_PRC': 'bid_P2', 'BID_STEP2_BSTORD_RQTY': 'bid_Q2',
+        'ASK_STEP3_BSTORD_PRC': 'ask_P3', 'ASK_STEP3_BSTORD_RQTY': 'ask_Q3',
+        'BID_STEP3_BSTORD_PRC': 'bid_P3', 'BID_STEP3_BSTORD_RQTY': 'bid_Q3',
+        'ASK_STEP4_BSTORD_PRC': 'ask_P4', 'ASK_STEP4_BSTORD_RQTY': 'ask_Q4',
+        'BID_STEP4_BSTORD_PRC': 'bid_P4', 'BID_STEP4_BSTORD_RQTY': 'bid_Q4',
+        'ASK_STEP5_BSTORD_PRC': 'ask_P5', 'ASK_STEP5_BSTORD_RQTY': 'ask_Q5',
+        'BID_STEP5_BSTORD_PRC': 'bid_P5', 'BID_STEP5_BSTORD_RQTY': 'bid_Q5'}, inplace=True)
+    return rq
+
+def load_and_format(data_dir, sec_type, data_name, trade_assumption, file=None):
     '''
     load raw order book data & change column names
+    mkt_data : real market transaction record
+    sim_data : order --> transaction feedback from simulator
     '''
+    symbol = data_name.split(sep='_')[0]
+    mkt_raw_file = os.path.join(data_dir,'mkt_data', sec_type, symbol, data_name)
+    rq = pd.read_csv(mkt_raw_file) # raw_tick
+    print(mkt_raw_file, "is loaded")
 
-    if file is None:
-        raw_file = data_dir+ '/' + 'trade2009_' + str(data_no) + '.csv'
+    if trade_assumption == 'market_simulator':
+        sim_raw_file = os.path.join(data_dir,'sim_data', sec_type, symbol, data_name)
+        sim = pd.read_csv(sim_raw_file)
+        sim['OrderTime'] = pd.to_datetime(sim['OrderTime'])
+        sim['ExecTime'] = pd.to_datetime(sim['ExecTime'])
     else:
-        raw_file = data_dir + '/' + file
-    rq = pd.read_csv(raw_file) # raw_tick # os.listdir(data_dir)
-    print(raw_file, "is loaded")
-
-    def preprocess(rq):
-        rq['dt_time'] = [
-            datetime.time(int(str(x)[:-7]), int(str(x)[-7:-5]), int(str(x)[-5:-3]), int(str(x)[-3:]) * 1000) for x in
-            rq['time']]
-        rq['time_hr'] = [x.hour for x in rq['dt_time']]
-        rq['time_min'] = [x.minute for x in rq['dt_time']]
-        rq['time_sec'] = [x.second for x in rq['dt_time']]
-
-        rq.rename(columns={
-            'price': 'trd_prc', 'volume': 'trd_vol', 'ASK_TOT_ORD_RQTY': 'ask_Qa', 'BID_TOT_ORD_RQTY': 'bid_Qa',
-            'ASK_STEP1_BSTORD_PRC': 'ask_P1', 'ASK_STEP1_BSTORD_RQTY': 'ask_Q1', 'BID_STEP1_BSTORD_PRC': 'bid_P1',
-            'BID_STEP1_BSTORD_RQTY': 'bid_Q1',
-            'ASK_STEP2_BSTORD_PRC': 'ask_P2', 'ASK_STEP2_BSTORD_RQTY': 'ask_Q2', 'BID_STEP2_BSTORD_PRC': 'bid_P2',
-            'BID_STEP2_BSTORD_RQTY': 'bid_Q2',
-            'ASK_STEP3_BSTORD_PRC': 'ask_P3', 'ASK_STEP3_BSTORD_RQTY': 'ask_Q3', 'BID_STEP3_BSTORD_PRC': 'bid_P3',
-            'BID_STEP3_BSTORD_RQTY': 'bid_Q3',
-            'ASK_STEP4_BSTORD_PRC': 'ask_P4', 'ASK_STEP4_BSTORD_RQTY': 'ask_Q4', 'BID_STEP4_BSTORD_PRC': 'bid_P4',
-            'BID_STEP4_BSTORD_RQTY': 'bid_Q4',
-            'ASK_STEP5_BSTORD_PRC': 'ask_P5', 'ASK_STEP5_BSTORD_RQTY': 'ask_Q5', 'BID_STEP5_BSTORD_PRC': 'bid_P5',
-            'BID_STEP5_BSTORD_RQTY': 'bid_Q5'}, inplace=True)
-        return rq
+        sim = None
 
     # use all the data for training before final 10 minutes
     # final 10 minutes data is used for reward cal.
-    # Closing time (15:15) should not be changed
-    tr_rq = rq[rq.time < 151500000]
-    cls_rq = rq[rq.time > 151500000]
+    #tr_rq = rq[(rq.time>90001000) & (rq.time < 151500000)]
+    tr_rq = preprocess(rq)
+    cls_prc = tr_rq.iloc[-1].trd_prc
 
-    tr_rq = preprocess(tr_rq)
-    cls_rq = preprocess(cls_rq)
-    cls_prc = cls_rq.iloc[0].trd_prc
+    return tr_rq, sim, cls_prc
 
-    return tr_rq, cls_rq, cls_prc
+def load_data(sec_type, data_dir, target_name, n_test_day, trade_assumption='midprice', mode='debug', train_all=False):
+    #  train with multiple securities & test with one target
+    name2sym = {'삼성전자':'005930','삼성전자우':'005935','하이닉스':'000660',
+                '현대차':'005380','LG화학':'051910','삼성바이오로직스':'207940',
+                '셀트리온':'068270', 'POSCO':'005490', 'NAVER':'035420',
+                '삼성물산':'028260','3월물':'101P3000','6월물':'101P6000',
+                '9월물':'101P9000'}
+    #dir_path = os.path.join(data_dir, sec_type)
+    target_symbol = name2sym[target_name]
+    if trade_assumption == 'midprice':
+        if train_all:
+            all_symbols = os.listdir(os.path.join(data_dir, 'mkt_data', sec_type))
+            all_data_names = []
+            for symb in all_symbols:
+                all_data_names+=os.listdir(os.path.join(data_dir, 'mkt_data', sec_type, symb))
+        # train and test with one target security
+        else:
+            all_data_names = os.listdir(os.path.join(data_dir, 'mkt_data', sec_type, target_symbol))
+    else: # trade with market simulation
+        if train_all:
+            all_symbols = os.listdir(os.path.join(data_dir, 'sim_data', sec_type))
+            all_data_names = []
+            for symb in all_symbols:
+                all_data_names+=os.listdir(os.path.join(data_dir, 'sim_data', sec_type, symb))
+        # train and test with one target security
+        else:
+            all_data_names = os.listdir(os.path.join(data_dir, 'sim_data', sec_type, target_symbol))
 
-def load_data(args):
     # randomly split train, test data and return preprocessed data list
-    if args.mode=='debug':
-        test_set_no = [58, 61]
-        train_set_no = [70, 72]
+    if mode=='debug':
+        test_set_names = random.sample(all_data_names, 2)
+        train_set_names = random.sample(list(set(all_data_names)-set(test_set_names)), 2)
     else:
-        test_set_no = random.sample(args.data_no_list, args.n_test_day)
-        train_set_no = list(set(args.data_no_list) - set(test_set_no))
+        test_set_names = random.sample(all_data_names, n_test_day)
+        train_set_names = list(set(all_data_names) - set(test_set_names))
+        print('selected test set : {}'.format(test_set_names))
 
     train_data_list, test_data_list = [], []
-    for data_no in train_set_no:
-        data_set_raw_q, cls_raw_q, cls_prc = load_and_format(args.data_dir, data_no)
-        min1_agg_data = agg_to_min1(data_set_raw_q)
-        train_data_list.append((min1_agg_data, data_set_raw_q, cls_raw_q, cls_prc))
-    for data_no in test_set_no:
-        data_set_raw_q, cls_raw_q, cls_prc = load_and_format(args.data_dir, data_no)
-        min1_agg_data = agg_to_min1(data_set_raw_q)
-        test_data_list.append((min1_agg_data, data_set_raw_q, cls_raw_q, cls_prc))
+    for data_name in train_set_names:
+        if data_name[-3:] != 'csv':
+            pass
+        rawq_df, simtr_df, cls_prc = load_and_format(data_dir, sec_type, data_name, trade_assumption)
+        min1_agg = agg_to_min1(rawq_df)
+        train_data_list.append((min1_agg, rawq_df, simtr_df, cls_prc))
+    for data_name in test_set_names:
+        if data_name[-3:] != 'csv':
+            pass
+        rawq_df, simtr_df, cls_prc = load_and_format(data_dir, sec_type, data_name, trade_assumption)
+        min1_agg = agg_to_min1(rawq_df)
+        test_data_list.append((min1_agg, rawq_df, simtr_df, cls_prc))
     return train_data_list, test_data_list
 
 def select_data(data_list):
@@ -112,8 +153,7 @@ def agg_to_min1(rq):
     mkt_min1_trd_vol = pd.DataFrame(mkt_min1_trd_vol)
     mkt_min1_trd_vol.columns = ['agg_trd_vol']
     mkt_agg = mkt_min1_vol.join(mkt_min1_trd_vol)
-
-    ## Takes the last status
+    ## Takes the snapshot of last status
     mkt_last = rq.groupby(['date', 'time_hr', 'time_min']).last()
     mkt_last = mkt_last[['dt_time', 'midprice', 'trd_prc',
                          'bid_P1', 'bid_P2', 'bid_P3', 'bid_P4', 'bid_P5',
@@ -148,16 +188,69 @@ def agg_to_sec1(rq):
     mkt_sec1 = mkt_agg.join(mkt_last)
     return mkt_sec1
 
-def normalize_target_cols(all_df, ):
-    #non_target = ['agg_vol', 'agg_trd_vol', 'pressure']
-    non_target = ['agg_trd_vol', 'pressure']
-    target_df = all_df.drop(non_target, 1)
-    normed = min_max_normalize(target_df)
-    normed_df = all_df[non_target].join(normed)
+def select_and_normalize(all_df, ):
+    #raw_cols = ['agg_vol', 'agg_trd_vol', 'pressure']
+    raw_cols = ['agg_trd_vol', 'pressure']
+    mm_cols = ['trd_prc']
+    last_df = all_df.iloc[-1]
+    snapshot_prc = ['bid_P1', 'bid_P2', 'bid_P3', 'bid_P4', 'bid_P5',
+                'ask_P1', 'ask_P2', 'ask_P3', 'ask_P4', 'ask_P5']
+    snapshot_bidq = ['bid_Q1', 'bid_Q2', 'bid_Q3', 'bid_Q4', 'bid_Q5']
+    snapshot_askq = ['ask_Q1', 'ask_Q2', 'ask_Q3', 'ask_Q4', 'ask_Q5']
+
+    mm_normed = min_max_normalize(all_df[mm_cols])
+    prc_normed = (last_df[snapshot_prc] - last_df.midprice)/last_df.midprice * 100
+    top5_q = last_df[snapshot_bidq].sum() + last_df[snapshot_askq].sum()
+    bidq_normed = last_df[snapshot_bidq] / top5_q
+    askq_normed = last_df[snapshot_askq] / top5_q
+
+    normed_df = np.concatenate([all_df[raw_cols].values.flatten(), mm_normed.values.squeeze(),
+                    prc_normed.values, bidq_normed.values, askq_normed.values])
     return normed_df
 
 def min_max_normalize(df):
     return (df-df.min())/(df.max()-df.min())
+
+def get_data_from_db(symbol, ):
+    qara_fin = MongoClient('db.qara.kr')['fin']
+
+    today_early = DT.datetime.now().replace(hour=8)
+    t1 = time.time()
+    pd.DataFrame(list(qara_fin.trading_lvl2.find({'symbol':symbol,
+            "timestamp": {"$gt":time.mktime(today_early.timetuple())}},{'_id':1, 'ASK_STEP1_BSTORD_PRC':1, 'ASK_STEP2_BSTORD_RQTY':1})))
+    #trans_df = pd.DataFrame(list(qara_fin.trading_lvl2.find({'symbol':symbol,
+    #                        "timestamp": {"$gt":time.mktime(today_early.timetuple())}}),{'_id':1}))
+    t2 = time.time()
+    print(t2-t1)
+    pdb.set_trace()
+    trans_df = trans_df.sort_values(by=['local_timestamp'])
+    trans_df = trans_df.reset_index(drop=True)
+    dt_list = []
+    t_list = []
+    for idx, row in trans_df.iterrows():
+        dt_obj = DT.datetime.fromtimestamp(row.local_timestamp)
+        dt = int(dt_obj.strftime('%Y%m%d'))
+        t = int(dt_obj.strftime('%H%M%S%f')[:-3])
+        dt_list.append(dt)
+        t_list.append(t)
+    trans_df['date'] = dt_list
+    trans_df['time'] = t_list
+    trans_df['midprice'] = (trans_df.BID_STEP1_BSTORD_PRC + trans_df.ASK_STEP1_BSTORD_PRC) / 2
+    raw_df = preprocess(trans_df)
+    min1_agg = agg_to_min1(raw_df)
+    return min1_agg, raw_df
+
+def get_live_orders():
+    order_db = MongoClient('db.qara.kr').order_request
+
+    #cur_ts = time.mktime(DT.datetime.now().replace(second=0))
+    cur_ts = time.mktime(DT.datetime.now().replace(hour=14,minute=13,second=0).timetuple())
+    order_df = pd.DataFrame(list(order_db.order_request.find({'rem_amt':{'$gt':0}, 'order_start_ts':{'$lt':cur_ts}})))
+
+    final_order = order_df.loc[order_df.order_end_ts<=cur_ts]
+    valid_order = order_df.loc[order_df.order_end_ts>cur_ts]
+    return final_order, valid_order
+
 
 def zero_padding(mat):
     unsorted_length = []
@@ -169,14 +262,12 @@ def zero_padding(mat):
         padded_mat[idx,:unsorted_length[idx]] = vec
     return padded_mat, unsorted_length
 
-
 def to_feed_format(list_data):
     states_x1 = np.array([x[0][0] for x in list_data])
     states_x2 = np.array([x[0][1] for x in list_data])
     padded_x2, unsorted_length = zero_padding(states_x2)
     rewards = np.array([x[1] for x in list_data])
     return states_x1, padded_x2, rewards, unsorted_length
-
 
 def sort_sequence(data, len_data):
     data = torch.FloatTensor(data).cuda()

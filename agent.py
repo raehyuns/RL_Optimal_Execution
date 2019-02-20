@@ -17,7 +17,7 @@ class Agent(nn.Module):
         super(Agent, self).__init__()
         # input size is number of used variables (for now, simple model)
         # if use trainable preprocessing model
-        input_size = args.min_lookback + 4
+        input_size = args.min_lookback * 5
         self.epsilon = args.init_exploration_rate
         self.eplr_decay = args.exploration_decay
         self.min_eplr = args.min_exploration_rate
@@ -43,7 +43,7 @@ class Agent(nn.Module):
             fc.append(nn.ReLU())
             fc.append(nn.Dropout(args.dropout))
         self.fc_layer = nn.Sequential(*fc)
-        self.pred_action = nn.Linear(args.fc_layer_size[-1], args.n_amt_lv+1)
+        self.pred_action = nn.Linear(args.fc_layer_size[-1], args.n_amt_lv*2+1)
         self.init_weight()
         self.select_optimizer(args)
 
